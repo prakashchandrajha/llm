@@ -196,7 +196,7 @@ services:
       KT_BACKEND: cuda
       KT_CUDA_ARCH: "12.0"
       KT_AMX: "0"
-      KT_KV_CACHE_GB: "2.7"
+      KT_KV_CACHE_GB: "2.5"
       LANGFUSE_HOST: http://host-gateway:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-langfuse-dev}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-langfuse-dev}
