@@ -1,0 +1,217 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 0 — Day Zero Stack (Inference + Training profiles, cgroup v2 enforced)
+# ─────────────────────────────────────────────────────────────────────────────
+# RULES enforced by this file:
+#   1. Every container has mem_limit == memswap_limit  →  swap is impossible,
+#      memory overruns become OOM kills visible in Langfuse/dmesg, never
+#      invisible swap thrashing.
+#   2. Two profiles:
+#        - inference : Memgraph + Qdrant + Mem0 + codebase-memory MCP + LiteLLM
+#        - training  : same minus KTransformers (deferred)
+#   3. All host bindings are 127.0.0.1.
+#
+# EXTERNAL SERVICES (not managed by this compose):
+#   - Langfuse stack  → langfuse project, http://localhost:3000  (healthy ✓)
+#   - Ollama          → systemd service,  http://localhost:11434 (healthy ✓)
+#                       Models present: qwen3:4b, nomic-embed-text, qwen3:8b,
+#                       qwen3.6:35b-a3b-q4_K_M, qwen2.5-coder:7b
+#                       Still needed: qwen3:0.5b, qwen3:3b, qwen3:7b
+#
+# Hardware: i7-14650HX (NO AMX), RTX 5050 8 GB (sm_120, Blackwell), 24 GB RAM,
+#           NVMe 5050 MB/s seq read, cgroup v2 unified hierarchy.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+x-restart-policy: &restart unless-stopped
+
+# All containers that need to reach host services (Ollama, Langfuse) use this.
+x-host-extra: &host_extra
+  extra_hosts:
+    - "host-gateway:host-gateway"
+
+services:
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ MEMGRAPH — Cypher KG. Bolt 7687. Hard limit 2.5 GB.                 ║
+  # ║ Healthcheck: mgconsole (always present in image).                    ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  memgraph:
+    image: memgraph/memgraph:latest
+    restart: *restart
+    profiles: ["inference", "training"]
+    command:
+      - "--also-log-to-stderr=true"
+      - "--telemetry-enabled=false"
+    ports:
+      - "127.0.0.1:7687:7687"
+      - "127.0.0.1:7444:7444"
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+      - memgraph_log:/var/log/memgraph
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host 127.0.0.1 --port 7687 --output-format=csv --no-history 2>/dev/null | grep -q '1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    mem_limit: 2560m
+    memswap_limit: 2560m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ QDRANT — Mem0 vector store. Hard limit 1.2 GB.                       ║
+  # ║ Healthcheck disabled: image has no curl/wget/bash/nc.                ║
+  # ║ Verified healthy from host: curl http://localhost:6333/healthz ✓     ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  qdrant:
+    image: qdrant/qdrant:v1.14.0
+    restart: *restart
+    profiles: ["inference", "training"]
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__LOG_LEVEL: INFO
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      disable: true
+    mem_limit: 1200m
+    memswap_limit: 1200m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ MEM0 REST API server (host Ollama + Qdrant backend). Port 8765.      ║
+  # ║ Custom python:3.11-slim image: pip install mem0ai + uvicorn.           ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  mem0-server:
+    image: python:3.11-slim
+    restart: *restart
+    profiles: ["inference", "training"]
+    <<: *host_extra
+    depends_on:
+      qdrant: {condition: service_started}
+    ports:
+      - "127.0.0.1:8765:8000"
+    environment:
+      MEM0_LLM_PROVIDER: ollama
+      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
+      MEM0_OLLAMA_BASE_URL: http://host-gateway:11434
+      MEM0_EMBEDDER_PROVIDER: ollama
+      MEM0_EMBEDDER_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
+      MEM0_VECTOR_STORE_PROVIDER: qdrant
+      MEM0_QDRANT_URL: http://qdrant:6333
+      MEM0_QDRANT_COLLECTION: ${MEM0_COLLECTION:-code-memory}
+    volumes:
+      - ./mem0-server.py:/app/server.py:ro
+    command: >
+      sh -c "pip install --quiet mem0ai qdrant-client ollama fastapi uvicorn &&
+             python /app/server.py"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    mem_limit: 768m
+    memswap_limit: 768m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ CODEBASE-MEMORY MCP — FastMCP/mem0 SSE server. Port 8888.            ║
+  # ║ Connect via: http://127.0.0.1:8888/sse                               ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  # codebase-memory:
+  #   image: elvismdev/mem0-mcp-selfhosted:latest
+  #   restart: *restart
+  #   profiles: ["inference", "training"]
+  #   <<: *host_extra
+  #   depends_on:
+  #     qdrant: {condition: service_started}
+  #   ports:
+  #     - "127.0.0.1:8888:8080"
+  #   environment:
+  #     MEM0_TRANSPORT: sse
+  #     MEM0_HOST: 0.0.0.0
+  #     MEM0_PORT: "8080"
+  #     MEM0_USER_ID: ${MEM0_USER_ID:-user}
+  #     MEM0_LOG_LEVEL: INFO
+  #     MEM0_PROVIDER: ollama
+  #     MEM0_OLLAMA_BASE_URL: http://host-gateway:11434
+  #     MEM0_OLLAMA_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
+  #     MEM0_OLLAMA_EMBED_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
+  #     MEM0_EMBED_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
+  #     MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
+  #     MEM0_QDRANT_URL: http://qdrant:6333
+  #     MEM0_INIT_COLLECTION: ${MEM0_COLLECTION:-code-memory}
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -sf http://localhost:8080/ -m 3 -o /dev/null || exit 1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+  #     start_period: 15s
+  #   mem_limit: 256m
+  #   memswap_limit: 256m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ LITELLM PROXY — unified OpenAI-compatible gateway. Port 4000.        ║
+  # ║ Traces every call to Langfuse. Ollama via host-gateway:11434.        ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: *restart
+    profiles: ["inference", "training"]
+    <<: *host_extra
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      LITELLM_LOG: INFO
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-litellm-master-2026}
+      LANGFUSE_HOST: http://host-gateway:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-langfuse-dev}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-langfuse-dev}
+    volumes:
+      - ./litellm-config.yml:/app/config.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health/liveliness > /dev/null 2>&1 || wget -qO- http://localhost:4000/health > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 512m
+    memswap_limit: 512m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ KTRANSFORMERS — opt-in profile only. Build DEFERRED (sm_120).        ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  ktransformers:
+    image: ktransformers-local:cuda13.2-sm120
+    restart: *restart
+    profiles: ["ktransformers"]
+    <<: *host_extra
+    ports:
+      - "127.0.0.1:10002:10002"
+    volumes:
+      - ktransformers_experts:/models/experts
+    environment:
+      KT_BACKEND: cuda
+      KT_CUDA_ARCH: "12.0"
+      KT_AMX: "0"
+      KT_KV_CACHE_GB: "2.7"
+      LANGFUSE_HOST: http://host-gateway:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-langfuse-dev}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-langfuse-dev}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    mem_limit: 6g
+    memswap_limit: 6g
+
+volumes:
+  memgraph_data:
+  memgraph_log:
+  qdrant_data:
+  ktransformers_experts:
