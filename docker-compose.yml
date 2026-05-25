@@ -6,7 +6,7 @@
 #      memory overruns become OOM kills visible in Langfuse/dmesg, never
 #      invisible swap thrashing.
 #   2. Two profiles:
-#        - inference : Memgraph + Qdrant + Mem0 + codebase-memory MCP + LiteLLM
+#        - inference : Memgraph + Qdrant + Mem0 + LiteLLM
 #        - training  : same minus KTransformers (deferred)
 #   3. All host bindings are 127.0.0.1.
 #
@@ -80,8 +80,11 @@ services:
     memswap_limit: 1200m
 
   # ╔══════════════════════════════════════════════════════════════════════╗
-  # ║ MEM0 REST API server (host Ollama + Qdrant backend). Port 8765.      ║
-  # ║ Custom python:3.11-slim image: pip install mem0ai + uvicorn.           ║
+  # ║ MEM0 REST API — python:3.11-slim + pip install mem0ai.               ║
+  # ║ Port 8765 (host) → 8000 (container).                                 ║
+  # ║ pip cache volume prevents re-downloading on every restart.           ║
+  # ║ Memory.from_config() deferred to FastAPI startup event so /health    ║
+  # ║ responds immediately and crash loops are visible in logs.            ║
   # ╚══════════════════════════════════════════════════════════════════════╝
   mem0-server:
     image: python:3.11-slim
@@ -93,67 +96,32 @@ services:
     ports:
       - "127.0.0.1:8765:8000"
     environment:
-      MEM0_LLM_PROVIDER: ollama
       MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
       MEM0_OLLAMA_BASE_URL: http://host-gateway:11434
-      MEM0_EMBEDDER_PROVIDER: ollama
       MEM0_EMBEDDER_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
-      MEM0_VECTOR_STORE_PROVIDER: qdrant
       MEM0_QDRANT_URL: http://qdrant:6333
       MEM0_QDRANT_COLLECTION: ${MEM0_COLLECTION:-code-memory}
+      PIP_CACHE_DIR: /pip-cache
     volumes:
       - ./mem0-server.py:/app/server.py:ro
+      - mem0_pip_cache:/pip-cache
     command: >
-      sh -c "pip install --quiet mem0ai qdrant-client ollama fastapi uvicorn &&
+      sh -c "pip install --quiet mem0ai qdrant-client fastapi uvicorn &&
              python /app/server.py"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
-      start_period: 60s
-    mem_limit: 768m
-    memswap_limit: 768m
-
-  # ╔══════════════════════════════════════════════════════════════════════╗
-  # ║ CODEBASE-MEMORY MCP — FastMCP/mem0 SSE server. Port 8888.            ║
-  # ║ Connect via: http://127.0.0.1:8888/sse                               ║
-  # ╚══════════════════════════════════════════════════════════════════════╝
-  # codebase-memory:
-  #   image: elvismdev/mem0-mcp-selfhosted:latest
-  #   restart: *restart
-  #   profiles: ["inference", "training"]
-  #   <<: *host_extra
-  #   depends_on:
-  #     qdrant: {condition: service_started}
-  #   ports:
-  #     - "127.0.0.1:8888:8080"
-  #   environment:
-  #     MEM0_TRANSPORT: sse
-  #     MEM0_HOST: 0.0.0.0
-  #     MEM0_PORT: "8080"
-  #     MEM0_USER_ID: ${MEM0_USER_ID:-user}
-  #     MEM0_LOG_LEVEL: INFO
-  #     MEM0_PROVIDER: ollama
-  #     MEM0_OLLAMA_BASE_URL: http://host-gateway:11434
-  #     MEM0_OLLAMA_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
-  #     MEM0_OLLAMA_EMBED_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
-  #     MEM0_EMBED_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
-  #     MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
-  #     MEM0_QDRANT_URL: http://qdrant:6333
-  #     MEM0_INIT_COLLECTION: ${MEM0_COLLECTION:-code-memory}
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -sf http://localhost:8080/ -m 3 -o /dev/null || exit 1"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 10
-  #     start_period: 15s
-  #   mem_limit: 256m
-  #   memswap_limit: 256m
+      start_period: 90s
+    mem_limit: 1024m
+    memswap_limit: 1024m
 
   # ╔══════════════════════════════════════════════════════════════════════╗
   # ║ LITELLM PROXY — unified OpenAI-compatible gateway. Port 4000.        ║
   # ║ Traces every call to Langfuse. Ollama via host-gateway:11434.        ║
+  # ║ FIX: entrypoint already calls "litellm" — only pass flags here.      ║
+  # ║ FIX: healthcheck uses wget (curl not present in this image).         ║
   # ╚══════════════════════════════════════════════════════════════════════╝
   litellm-proxy:
     image: ghcr.io/berriai/litellm:main-stable
@@ -182,6 +150,7 @@ services:
 
   # ╔══════════════════════════════════════════════════════════════════════╗
   # ║ KTRANSFORMERS — opt-in profile only. Build DEFERRED (sm_120).        ║
+  # ║ KV cache set to 2.5 GB — corrected for 7707 MB usable VRAM.         ║
   # ╚══════════════════════════════════════════════════════════════════════╝
   ktransformers:
     image: ktransformers-local:cuda13.2-sm120
@@ -215,3 +184,4 @@ volumes:
   memgraph_log:
   qdrant_data:
   ktransformers_experts:
+  mem0_pip_cache:

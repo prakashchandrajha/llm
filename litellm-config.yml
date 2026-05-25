@@ -18,9 +18,13 @@ router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
   retry_after: 5
+  # FIX: fallbacks belong here at router level, not inside litellm_params
+  fallbacks:
+    - {"qwen3:35b-fallback": ["master"]}
 
 model_list:
   # ── Coordinator (Qwen3-0.5B) ─────────────────────────────────────────────
+  # NOTE: model not yet pulled — ollama pull qwen3:0.5b required
   - model_name: coordinator
     litellm_params:
       model: ollama/qwen3:0.5b
@@ -38,6 +42,7 @@ model_list:
       api_base: http://host-gateway:11434
 
   # ── Synthesis tier (Qwen3-3B) ────────────────────────────────────────────
+  # NOTE: model not yet pulled — ollama pull qwen3:3b required
   - model_name: synthesis
     litellm_params:
       model: ollama/qwen3:3b
@@ -48,7 +53,8 @@ model_list:
       model: ollama/qwen3:3b
       api_base: http://host-gateway:11434
 
-  # ── Master base (Qwen3-7B Q4-K-M) ────────────────────────────────────────
+  # ── Master base (Qwen3-7B) ───────────────────────────────────────────────
+  # NOTE: model not yet pulled — ollama pull qwen3:7b required
   - model_name: master
     litellm_params:
       model: ollama/qwen3:7b
@@ -77,11 +83,12 @@ model_list:
       model: ollama/qwen3.6:35b-a3b-q4_K_M
       api_base: http://host-gateway:11434
 
+  # FIX: fallbacks key removed from litellm_params (invalid there).
+  # Router-level fallback defined in router_settings.fallbacks above.
   - model_name: qwen3:35b-fallback
     litellm_params:
       model: ollama/qwen3.6:35b-a3b-q4_K_M
       api_base: http://host-gateway:11434
-      fallbacks: ["master"]
 
   # ── Coder (already present) ───────────────────────────────────────────────
   - model_name: qwen2.5-coder:7b
