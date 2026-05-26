@@ -96,8 +96,12 @@ services:
     ports:
       - "127.0.0.1:8765:8000"
     environment:
-      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b}
+      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen3:4b/no_think}
       MEM0_OLLAMA_BASE_URL: http://host-gateway:11434
+      # OLLAMA_HOST is what the ollama Python client actually reads.
+      # mem0ai's OllamaEmbedder ignores ollama_base_url in config and uses
+      # the ollama client directly, which reads this env var.
+      OLLAMA_HOST: http://host-gateway:11434
       MEM0_EMBEDDER_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
       MEM0_QDRANT_URL: http://qdrant:6333
       MEM0_QDRANT_COLLECTION: ${MEM0_COLLECTION:-code-memory}
@@ -106,7 +110,7 @@ services:
       - ./mem0-server.py:/app/server.py:ro
       - mem0_pip_cache:/pip-cache
     command: >
-      sh -c "pip install --quiet mem0ai qdrant-client fastapi uvicorn &&
+      sh -c "pip install --quiet mem0ai qdrant-client ollama fastapi uvicorn &&
              python /app/server.py"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" 2>/dev/null || exit 1"]
@@ -145,8 +149,8 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
-    mem_limit: 512m
-    memswap_limit: 512m
+    mem_limit: 2048m
+    memswap_limit: 2048m
 
   # ╔══════════════════════════════════════════════════════════════════════╗
   # ║ KTRANSFORMERS — opt-in profile only. Build DEFERRED (sm_120).        ║
@@ -178,6 +182,72 @@ services:
               capabilities: [gpu]
     mem_limit: 6g
     memswap_limit: 6g
+
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ CONTEXT7 MCP — documentation lookup                                  ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  context7-mcp:
+    image: node:22-slim
+    restart: unless-stopped
+    profiles: ["inference"]
+    command: npx -y @upstash/context7-mcp
+    ports:
+      - "127.0.0.1:8810:8810"
+    environment:
+      PORT: "8810"
+    mem_limit: 300m
+    memswap_limit: 300m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ SERENA MCP — code intelligence                                        ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  serena-mcp:
+    image: python:3.11-slim
+    restart: unless-stopped
+    profiles: ["inference"]
+    command: >
+      bash -c "pip install serena --quiet && serena-mcp --port 8811"
+    ports:
+      - "127.0.0.1:8811:8811"
+    volumes:
+      - /home/vvd/prakash:/workspace:ro
+    mem_limit: 300m
+    memswap_limit: 300m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ CODERUNNER MCP — sandboxed code execution                            ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  coderunner-mcp:
+    image: python:3.11-slim
+    restart: unless-stopped
+    profiles: ["inference"]
+    command: >
+      bash -c "pip install coderunner-mcp --quiet && coderunner-mcp --port 8812"
+    ports:
+      - "127.0.0.1:8812:8812"
+    mem_limit: 200m
+    memswap_limit: 200m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ CODEBASE-MEMORY MCP — Memgraph AST memory                            ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  codebase-memory-mcp:
+    image: python:3.11-slim
+    restart: unless-stopped
+    profiles: ["inference"]
+    command: >
+      bash -c "pip install codebase-memory-mcp --quiet && codebase-memory-mcp --port 8813"
+    ports:
+      - "127.0.0.1:8813:8813"
+    environment:
+      MEMGRAPH_HOST: memgraph
+      MEMGRAPH_PORT: "7687"
+    depends_on:
+      memgraph:
+        condition: service_healthy
+    mem_limit: 500m
+    memswap_limit: 500m
 
 volumes:
   memgraph_data:

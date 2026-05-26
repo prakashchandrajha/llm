@@ -1,16 +1,17 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # LiteLLM Proxy Config — Phase 0
-# Every call through port 4000 generates a Langfuse trace.
 # Ollama runs as host systemd service → http://host-gateway:11434
 # Langfuse runs in separate docker project → http://host-gateway:3000
 # Hardware: i7-14650HX (no AMX), RTX 5050 sm_120, CUDA 13.2
+# Model mapping (Ollama registry has no 0.5b/3b/7b):
+#   coordinator → qwen3:0.6b  (was 0.5b)
+#   synthesis   → qwen3:1.7b  (was 3b)
+#   master      → qwen3:8b    (was 7b, already present)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 litellm_settings:
   success_callback: ["langfuse"]
   failure_callback: ["langfuse"]
-  # Langfuse connection injected via env vars:
-  #   LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
   drop_params: true
   request_timeout: 300
 
@@ -18,21 +19,19 @@ router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
   retry_after: 5
-  # FIX: fallbacks belong here at router level, not inside litellm_params
   fallbacks:
     - {"qwen3:35b-fallback": ["master"]}
 
 model_list:
-  # ── Coordinator (Qwen3-0.5B) ─────────────────────────────────────────────
-  # NOTE: model not yet pulled — ollama pull qwen3:0.5b required
+  # ── Coordinator (Qwen3-0.6B) ─────────────────────────────────────────────
   - model_name: coordinator
     litellm_params:
-      model: ollama/qwen3:0.5b
+      model: ollama/qwen3:0.6b
       api_base: http://host-gateway:11434
 
-  - model_name: qwen3:0.5b
+  - model_name: qwen3:0.6b
     litellm_params:
-      model: ollama/qwen3:0.5b
+      model: ollama/qwen3:0.6b
       api_base: http://host-gateway:11434
 
   # ── Mem0 LLM + DoCoreAI (Qwen3-4B) ──────────────────────────────────────
@@ -41,28 +40,26 @@ model_list:
       model: ollama/qwen3:4b
       api_base: http://host-gateway:11434
 
-  # ── Synthesis tier (Qwen3-3B) ────────────────────────────────────────────
-  # NOTE: model not yet pulled — ollama pull qwen3:3b required
+  # ── Synthesis tier (Qwen3-1.7B) ──────────────────────────────────────────
   - model_name: synthesis
     litellm_params:
-      model: ollama/qwen3:3b
+      model: ollama/qwen3:1.7b
       api_base: http://host-gateway:11434
 
-  - model_name: qwen3:3b
+  - model_name: qwen3:1.7b
     litellm_params:
-      model: ollama/qwen3:3b
+      model: ollama/qwen3:1.7b
       api_base: http://host-gateway:11434
 
-  # ── Master base (Qwen3-7B) ───────────────────────────────────────────────
-  # NOTE: model not yet pulled — ollama pull qwen3:7b required
+  # ── Master base (Qwen3-8B, already present) ───────────────────────────────
   - model_name: master
     litellm_params:
-      model: ollama/qwen3:7b
+      model: ollama/qwen3:8b
       api_base: http://host-gateway:11434
 
-  - model_name: qwen3:7b
+  - model_name: qwen3:8b
     litellm_params:
-      model: ollama/qwen3:7b
+      model: ollama/qwen3:8b
       api_base: http://host-gateway:11434
 
   # ── Embedding tier ────────────────────────────────────────────────────────
@@ -76,15 +73,12 @@ model_list:
       model: ollama/nomic-embed-text
       api_base: http://host-gateway:11434
 
-  # ── 35B fallback (already downloaded: qwen3.6:35b-a3b-q4_K_M) ───────────
-  # sm_120 Blackwell — Ollama uses PTX JIT for sm_120. Expect 3-5 s prefill.
+  # ── 35B fallback (qwen3.6:35b-a3b-q4_K_M, already present) ──────────────
   - model_name: qwen3:35b-a3b
     litellm_params:
       model: ollama/qwen3.6:35b-a3b-q4_K_M
       api_base: http://host-gateway:11434
 
-  # FIX: fallbacks key removed from litellm_params (invalid there).
-  # Router-level fallback defined in router_settings.fallbacks above.
   - model_name: qwen3:35b-fallback
     litellm_params:
       model: ollama/qwen3.6:35b-a3b-q4_K_M
