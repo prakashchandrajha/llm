@@ -1,0 +1,49 @@
+base_model: Qwen/Qwen3-8B
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+load_in_4bit: true
+strict: false
+
+datasets:
+  - path: training/examples/ground_truth.jsonl
+    type: completion
+
+dataset_prepared_path: training/.prepared
+output_dir: training/runs/{organ_name}-qwen3-lora
+
+sequence_len: 512
+sample_packing: false
+pad_to_sequence_len: true
+
+adapter: qlora
+lora_model_dir:
+lora_r: ${LORA_RANK}
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_linear: true
+
+gradient_accumulation_steps: 4
+micro_batch_size: 2
+num_epochs: 2
+optimizer: adamw_bnb_8bit
+lr_scheduler: cosine
+learning_rate: 0.0002
+warmup_steps: 25
+
+bf16: auto
+tf32: true
+gradient_checkpointing: true
+flash_attention: true
+
+completions_only: true
+train_on_inputs: false
+
+logging_steps: 5
+eval_steps: 25
+save_steps: 50
+save_total_limit: 2
+
+special_tokens:
+  pad_token: "<|endoftext|>"
+

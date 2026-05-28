@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    "serena": {
+      "command": "serena",
+      "args": ["start-mcp-server", "--project", "/home/vvd/prakash/xorz/llm"]
+    },
+    "codebase-memory": {
+      "command": "npx",
+      "args": ["-y", "codebase-memory-mcp"]
+    },
+    "coderunner": {
+      "command": "npx",
+      "args": ["-y", "@mcpc-tech/code-runner-mcp"]
+    }
+  }
+}

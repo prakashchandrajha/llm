@@ -41,6 +41,7 @@ services:
     command:
       - "--also-log-to-stderr=true"
       - "--telemetry-enabled=false"
+      - "--bolt-server-name-for-init=Neo4j/5.0.0"
     ports:
       - "127.0.0.1:7687:7687"
       - "127.0.0.1:7444:7444"
@@ -141,10 +142,20 @@ services:
       LANGFUSE_HOST: http://host-gateway:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-langfuse-dev}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-langfuse-dev}
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
+      AION_API_KEY: ${AION_API_KEY}
+      COHERE_API_KEY: ${COHERE_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      XAI_API_KEY: ${XAI_API_KEY}
     volumes:
       - ./litellm-config.yml:/app/config.yaml:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health/liveliness > /dev/null 2>&1 || wget -qO- http://localhost:4000/health > /dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -184,70 +195,92 @@ services:
     memswap_limit: 6g
 
 
-  # ╔══════════════════════════════════════════════════════════════════════╗
-  # ║ CONTEXT7 MCP — documentation lookup                                  ║
-  # ╚══════════════════════════════════════════════════════════════════════╝
-  context7-mcp:
-    image: node:22-slim
-    restart: unless-stopped
-    profiles: ["inference"]
-    command: npx -y @upstash/context7-mcp
-    ports:
-      - "127.0.0.1:8810:8810"
-    environment:
-      PORT: "8810"
-    mem_limit: 300m
-    memswap_limit: 300m
+  # NOTE: All 4 MCP servers run natively via stdio (no Docker needed):
+  #   context7:        npx -y @upstash/context7-mcp
+  #   serena:          uvx serena start --project <path>
+  #   codebase-memory: npx -y codebase-memory-mcp
+  #   coderunner:      npx -y coderunner-mcp
 
   # ╔══════════════════════════════════════════════════════════════════════╗
-  # ║ SERENA MCP — code intelligence                                        ║
+  # ║ REDIS — LiteLLM semantic cache + Graphiti. Port 6379.               ║
   # ╚══════════════════════════════════════════════════════════════════════╝
-  serena-mcp:
-    image: python:3.11-slim
-    restart: unless-stopped
-    profiles: ["inference"]
-    command: >
-      bash -c "pip install serena --quiet && serena-mcp --port 8811"
+  redis:
+    image: redis:7-alpine
+    restart: *restart
+    profiles: ["inference", "training"]
     ports:
-      - "127.0.0.1:8811:8811"
+      - "127.0.0.1:6380:6379"
     volumes:
-      - /home/vvd/prakash:/workspace:ro
-    mem_limit: 300m
-    memswap_limit: 300m
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 307m
+    memswap_limit: 307m
 
   # ╔══════════════════════════════════════════════════════════════════════╗
-  # ║ CODERUNNER MCP — sandboxed code execution                            ║
+  # ║ GRAPHITI — Temporal knowledge graph. Port 8000.                     ║
+  # ║ Requires Memgraph (Bolt 7687) + LiteLLM on host.                   ║
   # ╚══════════════════════════════════════════════════════════════════════╝
-  coderunner-mcp:
-    image: python:3.11-slim
-    restart: unless-stopped
-    profiles: ["inference"]
-    command: >
-      bash -c "pip install coderunner-mcp --quiet && coderunner-mcp --port 8812"
-    ports:
-      - "127.0.0.1:8812:8812"
-    mem_limit: 200m
-    memswap_limit: 200m
-
-  # ╔══════════════════════════════════════════════════════════════════════╗
-  # ║ CODEBASE-MEMORY MCP — Memgraph AST memory                            ║
-  # ╚══════════════════════════════════════════════════════════════════════╝
-  codebase-memory-mcp:
-    image: python:3.11-slim
-    restart: unless-stopped
-    profiles: ["inference"]
-    command: >
-      bash -c "pip install codebase-memory-mcp --quiet && codebase-memory-mcp --port 8813"
-    ports:
-      - "127.0.0.1:8813:8813"
-    environment:
-      MEMGRAPH_HOST: memgraph
-      MEMGRAPH_PORT: "7687"
+  graphiti:
+    image: zepai/graphiti:latest
+    restart: *restart
+    profiles: ["inference", "training"]
+    <<: *host_extra
     depends_on:
-      memgraph:
-        condition: service_healthy
-    mem_limit: 500m
-    memswap_limit: 500m
+      memgraph: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      NEO4J_URI: bolt://memgraph:7687
+      NEO4J_USER: ""
+      NEO4J_PASSWORD: ""
+      NEO4J_DATABASE: memgraph
+      DEFAULT_DATABASE: memgraph
+      OPENAI_API_KEY: "local-bypass"
+      OPENAI_BASE_URL: http://host-gateway:4000/v1
+      LLM_MODEL: qwen3:4b
+      EMBEDDER_MODEL: nomic-embed-text
+      EMBEDDER_BASE_URL: http://host-gateway:4000/v1
+    volumes:
+      - ./zep_graphiti_patch.py:/app/graph_service/zep_graphiti.py:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthcheck')\" 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    mem_limit: 512m
+    memswap_limit: 512m
+
+  # ╔══════════════════════════════════════════════════════════════════════╗
+  # ║ ACTIVEPIECES — Workflow automation (MIT). Port 8080.                ║
+  # ╚══════════════════════════════════════════════════════════════════════╝
+  activepieces:
+    image: activepieces/activepieces:latest
+    restart: *restart
+    profiles: ["inference"]
+    ports:
+      - "127.0.0.1:8080:80"
+    environment:
+      AP_ENGINE_EXECUTABLE_PATH: dist/packages/engine/main.js
+      AP_ENCRYPTION_KEY: ${AP_ENCRYPTION_KEY:-change-me-32-char-key-here-1234}
+      AP_JWT_SECRET: ${AP_JWT_SECRET:-change-me-jwt-secret-here-1234567}
+      AP_FRONTEND_URL: http://localhost:8080
+      AP_TELEMETRY_ENABLED: "false"
+      AP_TEMPLATES_SOURCE_URL: ""
+    volumes:
+      - activepieces_data:/root/.activepieces
+    mem_limit: 409m
+    memswap_limit: 409m
+
+  # NOTE: Jan runs as a native desktop app, not Docker.
+  # Install: https://jan.ai  — runs on port 1337 natively.
+  # Configure Ollama base URL to http://localhost:11434 in Jan settings.
+
 
 volumes:
   memgraph_data:
@@ -255,3 +288,6 @@ volumes:
   qdrant_data:
   ktransformers_experts:
   mem0_pip_cache:
+  redis_data:
+  activepieces_data:
+  jan_data:

@@ -3,10 +3,27 @@
 # Ollama runs as host systemd service → http://host-gateway:11434
 # Langfuse runs in separate docker project → http://host-gateway:3000
 # Hardware: i7-14650HX (no AMX), RTX 5050 sm_120, CUDA 13.2
-# Model mapping (Ollama registry has no 0.5b/3b/7b):
-#   coordinator → qwen3:0.6b  (was 0.5b)
-#   synthesis   → qwen3:1.7b  (was 3b)
-#   master      → qwen3:8b    (was 7b, already present)
+#
+# Active fallback chain (fallback-expert):
+#   1. Cerebras  — gpt-oss-120b          (fastest free cloud, 500-2000 tok/s)
+#   2. Groq      — llama-3.3-70b         (fast free cloud)
+#   3. Mistral   — mistral-large-latest  (European fallback)
+#   4. OpenRouter — free router          (free multi-provider pool)
+#   5. NVIDIA     — llama-3.3-70b         (NVIDIA cloud)
+#   6. Local      — qwen3.6:35b-a3b via Ollama (always available)
+#
+# Gemini, Aion, Cohere, DeepSeek, NVIDIA reasoning, and xAI are configured
+# below for direct use. Gemini is not active while the key returns free-tier quota 0 / 429.
+# Aion is not active because the smoke test produced low-quality final content.
+# DeepSeek is not active while the key returns insufficient balance / 402.
+# xAI is not active while the account has no credits/licence.
+#
+# ── ForkKV Multi-LoRA Serving Optimization ──────────────────────────────────
+# To prevent TTFT spikes during multi-adapter inference (6 active LoRAs),
+# use dynamo/vLLM with ForkKV copy-on-write SRAM execution:
+#   DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+#   python -m dynamo.vllm --model Qwen/Qwen3-8B \
+#     --enforce-eager --enable-lora --max-lora-rank 64
 # ═══════════════════════════════════════════════════════════════════════════════
 
 litellm_settings:
@@ -16,14 +33,164 @@ litellm_settings:
   request_timeout: 300
 
 router_settings:
-  routing_strategy: simple-shuffle
-  num_retries: 2
-  retry_after: 5
+  routing_strategy: latency-based-routing
+  enable_pre_call_check: true
+  cooldown_time: 30
+  num_retries: 3
+  redis_host: "host-gateway"
+  redis_port: 6380
   fallbacks:
-    - {"qwen3:35b-fallback": ["master"]}
+    - fallback-expert:
+        - fallback-expert-groq
+        - fallback-expert-mistral
+        - fallback-expert-openrouter-free
+        - fallback-expert-nvidia
+        - fallback-expert-local
 
 model_list:
+  # ── Active Fallback Expert ────────────────────────────────────────────────
+
+  # Public model name. This is the name callers use; on failure the router
+  # falls through to the tier-specific deployments below.
+  - model_name: fallback-expert
+    litellm_params:
+      model: openai/gpt-oss-120b
+      api_base: https://api.cerebras.ai/v1
+      api_key: os.environ/CEREBRAS_API_KEY
+      rpm: 30
+
+  # Tier 1: Cerebras (fastest free cloud)
+  - model_name: fallback-expert-cerebras
+    litellm_params:
+      model: openai/gpt-oss-120b
+      api_base: https://api.cerebras.ai/v1
+      api_key: os.environ/CEREBRAS_API_KEY
+      rpm: 30
+
+  # Tier 2: Groq
+  - model_name: fallback-expert-groq
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+      rpm: 30
+
+  # Tier 3: Gemini
+  - model_name: fallback-expert-gemini
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 5
+
+  # Tier 4: Mistral
+  - model_name: fallback-expert-mistral
+    litellm_params:
+      model: mistral/mistral-large-latest
+      api_key: os.environ/MISTRAL_API_KEY
+      rpm: 2
+
+  # Tier 5: OpenRouter
+  - model_name: fallback-expert-openrouter
+    litellm_params:
+      model: openrouter/auto
+      api_key: os.environ/OPENROUTER_API_KEY
+      rpm: 30
+
+  - model_name: fallback-expert-openrouter-free
+    litellm_params:
+      model: openrouter/openrouter/free
+      api_key: os.environ/OPENROUTER_API_KEY
+      rpm: 20
+
+  - model_name: openrouter-qwen3-coder-free
+    litellm_params:
+      model: openrouter/qwen/qwen3-coder:free
+      api_key: os.environ/OPENROUTER_API_KEY
+      rpm: 20
+
+  - model_name: openrouter-nemotron-free
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+      api_key: os.environ/OPENROUTER_API_KEY
+      rpm: 20
+
+  # Direct: DeepSeek. Current key lists models but chat returns 402.
+  - model_name: fallback-expert-deepseek
+    litellm_params:
+      model: deepseek/deepseek-v4-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 30
+
+  - model_name: deepseek-reasoner
+    litellm_params:
+      model: deepseek/deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 10
+
+  # Direct: Aion Labs
+  - model_name: fallback-expert-aion
+    litellm_params:
+      model: openai/aion-labs/aion-2.0
+      api_base: https://api.aionlabs.ai/v1
+      api_key: os.environ/AION_API_KEY
+      rpm: 20
+
+  - model_name: aion-reasoning
+    litellm_params:
+      model: openai/aion-labs/aion-2.5
+      api_base: https://api.aionlabs.ai/v1
+      api_key: os.environ/AION_API_KEY
+      rpm: 10
+
+  # Tier 5: NVIDIA
+  - model_name: fallback-expert-nvidia
+    litellm_params:
+      model: openai/meta/llama-3.3-70b-instruct
+      api_base: https://integrate.api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_API_KEY
+      rpm: 30
+
+  - model_name: nvidia-nemotron-reasoning
+    litellm_params:
+      model: openai/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+      api_base: https://integrate.api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_API_KEY
+      rpm: 10
+
+  # Direct: Cohere trial/non-commercial models
+  - model_name: cohere-command-a
+    litellm_params:
+      model: cohere/command-a-03-2025
+      api_key: os.environ/COHERE_API_KEY
+      rpm: 20
+
+  - model_name: cohere-command-a-reasoning
+    litellm_params:
+      model: cohere/command-a-reasoning-08-2025
+      api_key: os.environ/COHERE_API_KEY
+      rpm: 10
+
+  # Direct: xAI. Current key can list no models until credits/licence exist.
+  - model_name: xai-grok-reasoning
+    litellm_params:
+      model: openai/grok-4.20-reasoning
+      api_base: https://api.x.ai/v1
+      api_key: os.environ/XAI_API_KEY
+      rpm: 5
+
+  # Tier 6: Local 35B (always available)
+  - model_name: fallback-expert-local
+    litellm_params:
+      model: ollama/qwen3.6:35b-a3b-q4_K_M
+      api_base: http://host-gateway:11434
+
   # ── Coordinator (Qwen3-0.6B) ─────────────────────────────────────────────
+  - model_name: coordinator-minicpm5
+    litellm_params:
+      model: ollama/openbmb/minicpm5
+      api_base: http://host-gateway:11434
+
+  # Active coordinator. MiniCPM5 is installed but failed the 10-case routing
+  # schema test, so Qwen3-0.6B stays active for Day 3.
   - model_name: coordinator
     litellm_params:
       model: ollama/qwen3:0.6b
@@ -51,7 +218,7 @@ model_list:
       model: ollama/qwen3:1.7b
       api_base: http://host-gateway:11434
 
-  # ── Master base (Qwen3-8B, already present) ───────────────────────────────
+  # ── Master base (Qwen3-8B) ────────────────────────────────────────────────
   - model_name: master
     litellm_params:
       model: ollama/qwen3:8b
@@ -73,7 +240,7 @@ model_list:
       model: ollama/nomic-embed-text
       api_base: http://host-gateway:11434
 
-  # ── 35B fallback (qwen3.6:35b-a3b-q4_K_M, already present) ──────────────
+  # ── 35B local (qwen3.6:35b-a3b-q4_K_M) ──────────────────────────────────
   - model_name: qwen3:35b-a3b
     litellm_params:
       model: ollama/qwen3.6:35b-a3b-q4_K_M
@@ -84,7 +251,7 @@ model_list:
       model: ollama/qwen3.6:35b-a3b-q4_K_M
       api_base: http://host-gateway:11434
 
-  # ── Coder (already present) ───────────────────────────────────────────────
+  # ── Coder ─────────────────────────────────────────────────────────────────
   - model_name: qwen2.5-coder:7b
     litellm_params:
       model: ollama/qwen2.5-coder:7b
